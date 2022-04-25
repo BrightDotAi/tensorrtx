@@ -20,11 +20,16 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(/usr/local/cuda/include)
 link_directories(/usr/local/cuda/lib64)
 # tensorrt
-include_directories(/usr/include/x86_64-linux-gnu/)
-link_directories(/usr/lib/x86_64-linux-gnu/)
+#include_directories(/usr/include/x86_64-linux-gnu/)
+#link_directories(/usr/lib/x86_64-linux-gnu/)
+
+set(SMS 52 53)
+foreach(sm ${SMS})
+    set(GENCODE ${GENCODE} -gencode arch=compute_${sm},code=sm_${sm})
+endforeach()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Ofast -g -Wfatal-errors -D_MWAITXINTRIN_H_INCLUDED")
-cuda_add_library(myplugins SHARED yololayer.cu)
+cuda_add_library(myplugins SHARED yololayer.cu OPTIONS ${GENCODE})
 target_link_libraries(myplugins nvinfer cudart)
 
 find_package(OpenCV)
