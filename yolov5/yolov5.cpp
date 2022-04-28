@@ -11,8 +11,8 @@
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
 #define NMS_THRESH 0.4
-#define CONF_THRESH 0.5
-#define BATCH_SIZE 1
+#define CONF_THRESH 0.4
+#define BATCH_SIZE 2
 #define MAX_IMAGE_INPUT_SIZE_THRESH 3000 * 3000 // ensure it exceed the maximum size in the input images !
 
 // stuff we know about the network and the input/output blobs
@@ -58,23 +58,55 @@ ICudaEngine* build_engine(unsigned int maxBatchSize, IBuilder* builder, IBuilder
     auto spp9 = SPPF(network, weightMap, *bottleneck_csp8->getOutput(0), get_width(1024, gw), get_width(1024, gw), 5, "model.9");
     /* ------ yolov5 head ------ */
     auto conv10 = convBlock(network, weightMap, *spp9->getOutput(0), get_width(512, gw), 1, 1, 1, "model.10");
-
+    #if 0
     auto upsample11 = network->addResize(*conv10->getOutput(0));
     assert(upsample11);
     upsample11->setResizeMode(ResizeMode::kNEAREST);
     upsample11->setOutputDimensions(bottleneck_csp6->getOutput(0)->getDimensions());
-
     ITensor* inputTensors12[] = { upsample11->getOutput(0), bottleneck_csp6->getOutput(0) };
+    #else
+    Weights emptywts{ DataType::kFLOAT, nullptr, 0 };
+    int w_size = get_width(512, gw), ups_size = w_size * 2 * 2;
+    float* deval = reinterpret_cast<float*>(malloc(sizeof(float) * ups_size));
+    for (int i = 0; i < ups_size; i++) {
+        deval[i] = 1.0;
+    }
+    nvinfer1::Dims dim10 = conv10->getOutput(0)->getDimensions();
+    printf("w_size %d, ups_size %d, dims10:%d:(%d,%d,%d,%d)\n", 
+	     w_size, ups_size, dim10.nbDims, dim10.d[0], dim10.d[1], dim10.d[2], dim10.d[3]);
+    Weights deconvwts11{ DataType::kFLOAT, deval, ups_size };
+    IDeconvolutionLayer* deconv11 = network->addDeconvolutionNd(*conv10->getOutput(0), w_size, DimsHW{ 2, 2 }, deconvwts11, emptywts);
+    deconv11->setStrideNd(DimsHW{ 2, 2 });
+    deconv11->setNbGroups(w_size);
+    weightMap["deconv11"] = deconvwts11; 
+    nvinfer1::Dims dim11 = deconv11->getOutput(0)->getDimensions();
+    printf("w_size %d, ups_size %d, dims11:%d:(%d,%d,%d,%d)\n", 
+	     w_size, ups_size, dim11.nbDims, dim11.d[0], dim11.d[1], dim11.d[2], dim11.d[3]);
+    nvinfer1::Dims dim6 = bottleneck_csp6->getOutput(0)->getDimensions();
+    printf("w_size %d, ups_size %d, dims6:%d:(%d,%d,%d,%d)\n", 
+	     w_size, ups_size, dim6.nbDims, dim6.d[0], dim6.d[1], dim6.d[2], dim6.d[3]);
+     
+    ITensor* inputTensors12[] = { deconv11->getOutput(0), bottleneck_csp6->getOutput(0) };
+    #endif
     auto cat12 = network->addConcatenation(inputTensors12, 2);
     auto bottleneck_csp13 = C3(network, weightMap, *cat12->getOutput(0), get_width(1024, gw), get_width(512, gw), get_depth(3, gd), false, 1, 0.5, "model.13");
     auto conv14 = convBlock(network, weightMap, *bottleneck_csp13->getOutput(0), get_width(256, gw), 1, 1, 1, "model.14");
 
+    #if 0
     auto upsample15 = network->addResize(*conv14->getOutput(0));
     assert(upsample15);
     upsample15->setResizeMode(ResizeMode::kNEAREST);
     upsample15->setOutputDimensions(bottleneck_csp4->getOutput(0)->getDimensions());
-
     ITensor* inputTensors16[] = { upsample15->getOutput(0), bottleneck_csp4->getOutput(0) };
+    #else
+    w_size = get_width(256, gw);
+    ups_size = w_size * 2 * 2;
+    Weights deconvwts15{ DataType::kFLOAT, deval, ups_size };
+    IDeconvolutionLayer* deconv15 = network->addDeconvolutionNd(*conv14->getOutput(0), w_size, DimsHW{ 2, 2 }, deconvwts15, emptywts);
+    deconv15->setStrideNd(DimsHW{ 2, 2 });
+    deconv15->setNbGroups(w_size); 
+    ITensor* inputTensors16[] = { deconv15->getOutput(0), bottleneck_csp4->getOutput(0) };
+    #endif
     auto cat16 = network->addConcatenation(inputTensors16, 2);
 
     auto bottleneck_csp17 = C3(network, weightMap, *cat16->getOutput(0), get_width(512, gw), get_width(256, gw), get_depth(3, gd), false, 1, 0.5, "model.17");
@@ -236,8 +268,10 @@ void APIToModel(unsigned int maxBatchSize, IHostMemory** modelStream, bool& is_p
     // Create model to populate the network, then set the outputs and create an engine
     ICudaEngine *engine = nullptr;
     if (is_p6) {
+	printf("using build_engine_p6\n");
         engine = build_engine_p6(maxBatchSize, builder, config, DataType::kFLOAT, gd, gw, wts_name);
     } else {
+	printf("using build_engine\n");
         engine = build_engine(maxBatchSize, builder, config, DataType::kFLOAT, gd, gw, wts_name);
     }
     assert(engine != nullptr);
@@ -253,6 +287,14 @@ void APIToModel(unsigned int maxBatchSize, IHostMemory** modelStream, bool& is_p
 
 void doInference(IExecutionContext& context, cudaStream_t& stream, void **buffers, float* output, int batchSize) {
     // infer on the batch asynchronously, and DMA output back to host
+    context.enqueue(batchSize, buffers, stream, nullptr);
+    CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchSize * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);
+}
+
+void doInference_v(IExecutionContext& context, cudaStream_t& stream, void **buffers, float* input, float* output, int batchSize) {
+    // DMA input batch data to device, infer on the batch asynchronously, and DMA output back to host
+    CUDA_CHECK(cudaMemcpyAsync(buffers[0], input, batchSize * 3 * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
     context.enqueue(batchSize, buffers, stream, nullptr);
     CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchSize * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
@@ -288,7 +330,8 @@ bool parse_args(int argc, char** argv, std::string& wts, std::string& engine, bo
         if (net.size() == 2 && net[1] == '6') {
             is_p6 = true;
         }
-    } else if (std::string(argv[1]) == "-d" && argc == 4) {
+    //} else if (std::string(argv[1]) == "-d" && argc == 4) {
+      } else if ((std::string(argv[1]) == "-d" || std::string(argv[1]) == "-v" ) && argc == 4) {
         engine = std::string(argv[2]);
         img_dir = std::string(argv[3]);
     } else {
@@ -309,11 +352,12 @@ int main(int argc, char** argv) {
         std::cerr << "arguments not right!" << std::endl;
         std::cerr << "./yolov5 -s [.wts] [.engine] [n/s/m/l/x/n6/s6/m6/l6/x6 or c/c6 gd gw]  // serialize model to plan file" << std::endl;
         std::cerr << "./yolov5 -d [.engine] ../samples  // deserialize plan file and run inference" << std::endl;
+	std::cerr << "./yolov5 -v [.engine] video_file  // deserialize plan file and run inference to recognize video" << std::endl;
         return -1;
     }
 
     // create a model using the API directly and serialize it to a stream
-    if (!wts_name.empty()) {
+    if (std::string(argv[1]) == "-s") {//!wts_name.empty()) {
         IHostMemory* modelStream{ nullptr };
         APIToModel(BATCH_SIZE, &modelStream, is_p6, gd, gw, wts_name);
         assert(modelStream != nullptr);
@@ -325,6 +369,14 @@ int main(int argc, char** argv) {
         p.write(reinterpret_cast<const char*>(modelStream->data()), modelStream->size());
         modelStream->destroy();
         return 0;
+    }
+
+    std::vector<std::string> file_names;
+    if(std::string(argv[1]) == "-d") {
+       if (read_files_in_dir(img_dir.c_str(), file_names) < 0) {
+          std::cerr << "read_files_in_dir failed." << std::endl;
+          return -1;
+       }
     }
 
     // deserialize the .engine and run inference
@@ -343,12 +395,30 @@ int main(int argc, char** argv) {
     file.read(trtModelStream, size);
     file.close();
 
-    std::vector<std::string> file_names;
-    if (read_files_in_dir(img_dir.c_str(), file_names) < 0) {
-        std::cerr << "read_files_in_dir failed." << std::endl;
-        return -1;
-    }
+    std::map<int,std::string> class_dict;
+    class_dict[0] = "person";
+    class_dict[1] = "head";
+    class_dict[2] = "wm_g_open";
+    class_dict[3] = "wm_g_close";
+    class_dict[4] = "wm_g_close_idle";
+    class_dict[5] = "wm_g_close_work";
+    class_dict[6] = "wm_g_close_unknown";
+    class_dict[7] = "wm_s_open";
+    class_dict[8] = "wm_s_close";
+    class_dict[9] = "wm_s_close_idle";
+    class_dict[10] = "wm_s_close_work";
+    class_dict[11] = "wm_s_close_unknown";
+    class_dict[12] = "dr_open";
+    class_dict[13] = "dr_close";
+    class_dict[14] = "dr_close_idle";
+    class_dict[15] = "dr_close_work";
+    class_dict[16] = "dr_close_unknown";
+    class_dict[17] = "operation";
+    class_dict[18] = "operation_in";
+    class_dict[19] = "operation_out";
+    class_dict[20] = "operation_invis";
 
+    static float data[BATCH_SIZE * 3 * INPUT_H * INPUT_W];
     static float prob[BATCH_SIZE * OUTPUT_SIZE];
     IRuntime* runtime = createInferRuntime(gLogger);
     assert(runtime != nullptr);
@@ -372,15 +442,17 @@ int main(int argc, char** argv) {
     // Create stream
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
-    uint8_t* img_host = nullptr;
-    uint8_t* img_device = nullptr;
-    // prepare input data cache in pinned memory 
-    CUDA_CHECK(cudaMallocHost((void**)&img_host, MAX_IMAGE_INPUT_SIZE_THRESH * 3));
-    // prepare input data cache in device memory
-    CUDA_CHECK(cudaMalloc((void**)&img_device, MAX_IMAGE_INPUT_SIZE_THRESH * 3));
-    int fcount = 0;
-    std::vector<cv::Mat> imgs_buffer(BATCH_SIZE);
-    for (int f = 0; f < (int)file_names.size(); f++) {
+
+    if(std::string(argv[1]) == "-d") {
+      uint8_t* img_host = nullptr;
+      uint8_t* img_device = nullptr;
+      // prepare input data cache in pinned memory 
+      CUDA_CHECK(cudaMallocHost((void**)&img_host, MAX_IMAGE_INPUT_SIZE_THRESH * 3));
+      // prepare input data cache in device memory
+      CUDA_CHECK(cudaMalloc((void**)&img_device, MAX_IMAGE_INPUT_SIZE_THRESH * 3));
+      int fcount = 0;
+      std::vector<cv::Mat> imgs_buffer(BATCH_SIZE);
+      for (int f = 0; f < (int)file_names.size(); f++) {
         fcount++;
         if (fcount < BATCH_SIZE && f + 1 != (int)file_names.size()) continue;
         //auto start = std::chrono::system_clock::now();
@@ -414,17 +486,99 @@ int main(int argc, char** argv) {
             for (size_t j = 0; j < res.size(); j++) {
                 cv::Rect r = get_rect(img, res[j].bbox);
                 cv::rectangle(img, r, cv::Scalar(0x27, 0xC1, 0x36), 2);
-                cv::putText(img, std::to_string((int)res[j].class_id), cv::Point(r.x, r.y - 1), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(0xFF, 0xFF, 0xFF), 2);
+                cv::putText(img, std::to_string((int)res[j].class_id)+" "+std::to_string(res[j].conf), 
+			cv::Point(r.x, r.y - 1), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(0xFF, 0xFF, 0xFF), 2);
             }
             cv::imwrite("_" + file_names[f - fcount + 1 + b], img);
         }
         fcount = 0;
     }
+    CUDA_CHECK(cudaFree(img_device));
+    CUDA_CHECK(cudaFreeHost(img_host));
+   }else if(std::string(argv[1]) == "-v") {
+     cv::VideoCapture cap(img_dir);
+     std::string outFile = img_dir + "-det.mp4";
+     int fourcc = cv::VideoWriter::fourcc('m','p','4','v'); //('D', 'I', 'V', 'X');
+     double fps = cap.get(cv::CAP_PROP_FPS);
+     cv::Size size = cv::Size((int)cap.get(cv::CAP_PROP_FRAME_WIDTH),
+		(int)cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+     if (fps<= 0)
+       fps = 15;
+     cv::VideoWriter  writer(outFile, fourcc, fps,size);
+     
+     cv::Mat frame;
+     while (cap.read(frame)) { 
+         cv::Mat pr_img = preprocess_img(frame, INPUT_W, INPUT_H); // letterbox BGR to RGB
+         #if 0
+         static int g_idx=0;
+         cv::imwrite("input_" + std::to_string(g_idx++) + ".jpg",pr_img);
+         #endif
+         int i = 0;
+         for (int row = 0; row < INPUT_H; ++row) {
+             uchar* uc_pixel = pr_img.data + row * pr_img.step;
+             for (int col = 0; col < INPUT_W; ++col) {
+                 data[i] = (float)uc_pixel[2] / 255.0;
+                 data[i + INPUT_H * INPUT_W] = (float)uc_pixel[1] / 255.0;
+                 data[i + 2 * INPUT_H * INPUT_W] = (float)uc_pixel[0] / 255.0;
+                 uc_pixel += 3;
+                 ++i;
+             }
+         }   
+       
+         doInference_v(*context, stream, (void**)buffers, data, prob, BATCH_SIZE);
+         std::vector<Yolo::Detection> res;
+         nms(res, &prob[0], CONF_THRESH, NMS_THRESH);
+         for (size_t j = 0; j < res.size(); j++) {
+            cv::Rect r = get_rect(frame, res[j].bbox);
+            std::string label = class_dict[(int)res[j].class_id];
+	    // printf("%s conf: %f\n",label.c_str(), res[j].conf);
+            int baseline = 0, fontscale = 1.2, thickness = 2;
+            cv::Size textSize = getTextSize(label, cv::FONT_HERSHEY_PLAIN, fontscale, thickness, &baseline);
+            baseline += thickness;
+            cv::Point textOrg(r.x, r.y < 2 ? r.y + 10: r.y);
+            //cv::rectangle(frame, r, cv::Scalar(0x27, 0xC1, 0x36), 2);
+            cv::rectangle(frame, r, cv::Scalar(0, 0, 0xFF), 2);
+            cv::rectangle(frame,textOrg - cv::Point(0, textSize.height),textOrg + cv::Point(textSize.width, textSize.height), cv::Scalar(0,0,0), -1);
+            //cv::putText(frame, class_dict[(int)res[j].class_id]+" "+std::to_string(res[j].conf), cv::Point(r.x, r.y - 1), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(0xFF, 0xFF, 0xFF), 2);
+            cv::putText(frame, label+" "+std::to_string(res[j].conf), 
+			    cv::Point(r.x, r.y < 2 ? r.y + 10: r.y), cv::FONT_HERSHEY_PLAIN, fontscale, cv::Scalar(0xFF, 0xFF, 0xFF), thickness);
+           
+            #if 0 
+            if ((int)res[j].class_id == 1 ) { // head
+               int x = r.x;
+               int y = r.y;
+               int w = r.width;
+               int h = r.height;
+               int pixel = 30;
+               // printf("x %d, y %d, w %d, h %d\n",x,y,w,h);
+               cv::Mat obj_mat = (frame)(cv::Rect(x, y, w, h));
+               for (int i = 0; i < w; i += pixel) {
+                  for (int j = 0; j < h; j += pixel) {
+                     for (int k = i; k < i + pixel && k < w; k++) {
+                        for (int m = j; m < j + pixel && m < h; m++) {
+                           obj_mat.at<cv::Vec3b>(m, k)[0] = obj_mat.at<cv::Vec3b>(j, i)[0];
+                           obj_mat.at<cv::Vec3b>(m, k)[1] = obj_mat.at<cv::Vec3b>(j, i)[1];
+                           obj_mat.at<cv::Vec3b>(m, k)[2] = obj_mat.at<cv::Vec3b>(j, i)[2] > 200 ? 50 : obj_mat.at<cv::Vec3b>(j, i)[2];
+                        }
+                     }
+                  }
+               } 
+          
+            }
+            #endif
+         }
+
+         writer << frame;
+     }
+     cap.release();
+     writer.release();
+   }
+
 
     // Release stream and buffers
     cudaStreamDestroy(stream);
-    CUDA_CHECK(cudaFree(img_device));
-    CUDA_CHECK(cudaFreeHost(img_host));
+    //CUDA_CHECK(cudaFree(img_device));
+    //CUDA_CHECK(cudaFreeHost(img_host));
     CUDA_CHECK(cudaFree(buffers[inputIndex]));
     CUDA_CHECK(cudaFree(buffers[outputIndex]));
     // Destroy the engine

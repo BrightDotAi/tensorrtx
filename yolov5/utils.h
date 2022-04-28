@@ -3,6 +3,7 @@
 
 #include <dirent.h>
 #include <opencv2/opencv.hpp>
+#include "yololayer.h"
 
 static inline cv::Mat preprocess_img(cv::Mat& img, int input_w, int input_h) {
     int w, h, x, y;
@@ -21,8 +22,16 @@ static inline cv::Mat preprocess_img(cv::Mat& img, int input_w, int input_h) {
     }
     cv::Mat re(h, w, CV_8UC3);
     cv::resize(img, re, re.size(), 0, 0, cv::INTER_LINEAR);
-    cv::Mat out(input_h, input_w, CV_8UC3, cv::Scalar(128, 128, 128));
-    re.copyTo(out(cv::Rect(x, y, re.cols, re.rows)));
+    cv::Mat out;
+    if (Yolo::DATA_PREPROCESS_WAY == 0) { // Deepstream
+       out = cv::Mat(input_h, input_w, CV_8UC3, cv::Scalar(0, 0, 0));
+       re.copyTo(out(cv::Rect(0, 0, re.cols, re.rows)));
+    } else if (Yolo::DATA_PREPROCESS_WAY == 1) { // YOLOv5
+       out = cv::Mat(input_h, input_w, CV_8UC3, cv::Scalar(114, 114, 114));
+       re.copyTo(out(cv::Rect(x, y, re.cols, re.rows)));
+    } else { // your own way
+       //
+    }
     return out;
 }
 

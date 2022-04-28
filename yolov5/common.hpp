@@ -15,18 +15,28 @@ cv::Rect get_rect(cv::Mat& img, float bbox[4]) {
     float l, r, t, b;
     float r_w = Yolo::INPUT_W / (img.cols * 1.0);
     float r_h = Yolo::INPUT_H / (img.rows * 1.0);
-    if (r_h > r_w) {
+    if (r_h > r_w) { // 1920x1080 -> 640x640
         l = bbox[0] - bbox[2] / 2.f;
         r = bbox[0] + bbox[2] / 2.f;
-        t = bbox[1] - bbox[3] / 2.f - (Yolo::INPUT_H - r_w * img.rows) / 2;
-        b = bbox[1] + bbox[3] / 2.f - (Yolo::INPUT_H - r_w * img.rows) / 2;
+        if (Yolo::DATA_PREPROCESS_WAY == 1) { // YOLOv5 center padding
+           t = bbox[1] - bbox[3] / 2.f - (Yolo::INPUT_H - r_w * img.rows) / 2;
+           b = bbox[1] + bbox[3] / 2.f - (Yolo::INPUT_H - r_w * img.rows) / 2;
+	} else { // Deepstream top-left padding
+           t = bbox[1] - bbox[3] / 2.f;
+	   b = bbox[1] + bbox[3] / 2.f;
+	}
         l = l / r_w;
         r = r / r_w;
         t = t / r_w;
         b = b / r_w;
     } else {
-        l = bbox[0] - bbox[2] / 2.f - (Yolo::INPUT_W - r_h * img.cols) / 2;
-        r = bbox[0] + bbox[2] / 2.f - (Yolo::INPUT_W - r_h * img.cols) / 2;
+        if (Yolo::DATA_PREPROCESS_WAY == 1) { // YOLOv5 center padding
+           l = bbox[0] - bbox[2] / 2.f - (Yolo::INPUT_W - r_h * img.cols) / 2;
+           r = bbox[0] + bbox[2] / 2.f - (Yolo::INPUT_W - r_h * img.cols) / 2;
+	} else { // Deepstream top-left padding
+           l = bbox[0] - bbox[2] / 2.f;
+           r = bbox[0] + bbox[2] / 2.f;
+        } 
         t = bbox[1] - bbox[3] / 2.f;
         b = bbox[1] + bbox[3] / 2.f;
         l = l / r_h;
